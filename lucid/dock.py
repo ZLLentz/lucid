@@ -2,11 +2,12 @@
 Dock widget definitions
 """
 
+import logging
 from functools import partial
 from typing import ClassVar, cast
 
 from pydm.display import ScreenTarget, clear_compiled_ui_file_cache, load_file
-from pydm.utilities import IconFont, find_file
+from pydm.utilities import IconFont, find_file, is_qt_designer
 from pydm.utilities.macro import parse_macro_string
 from pydm.utilities.stylesheet import merge_widget_stylesheet
 from qtpy.QtCore import Qt
@@ -28,11 +29,14 @@ try:
 except ImportError:
     from qtpy.QtCore import pyqtProperty as Property  # type: ignore
 
+logger = logging.getLogger(__name__)
 ifont = IconFont()
 
 
 class LucidDock(QWidget):
     _instance: ClassVar["LucidDock"]
+    _default_widget: ClassVar[QWidget | None]
+    _default_widget_name: ClassVar[str]
 
     def __init__(self, parent: QWidget | None = None):
         LucidDock._instance = self
@@ -58,6 +62,8 @@ class LucidDock(QWidget):
         self.vlayout.addWidget(self.tab_widget)
         self.setLayout(self.vlayout)
 
+        self.apply_default_widget()
+
     def show_correct_tab_buttons(self, new_idx: int):
         tab_bar = self.tab_widget.tabBar()
         for idx in range(self.tab_widget.count()):
@@ -68,6 +74,34 @@ class LucidDock(QWidget):
                 button.show()
             else:
                 button.hide()
+
+    @classmethod
+    def set_default_widget(cls, widget: QWidget):
+        if hasattr(cls, "_default_widget"):
+            logger.warning(
+                f"Cannot set {widget.windowTitle()} as the default dock widget, "
+                f"already chose {cls._default_widget_name}"
+            )
+            return
+        cls._default_widget = widget
+        cls._default_widget_name = widget.windowTitle()
+        try:
+            self = cls._instance
+        except AttributeError:
+            # No instance yet, we'll do this later
+            return
+        self.apply_default_widget()
+
+    def apply_default_widget(self):
+        try:
+            widget = self._default_widget
+        except AttributeError:
+            return
+        if not isinstance(widget, QWidget):
+            return
+        self.add_to_dock(widget.windowTitle(), widget)
+        # Drop reference so we don't hold up gc if we close it later
+        LucidDock._default_widget = None
 
     @classmethod
     def add_to_dock_user_choice(cls, title: str, widget: QWidget):
@@ -176,13 +210,14 @@ class LucidDockButton(QPushButton):
         super().__init__(parent)
         self._filename: str = ""
         self._macro: str = ""
+        self._default = False
         self.clicked.connect(self.open_in_dock)
         self._icon = ifont.icon("anchor")
         self.setCursor(QCursor(self._icon.pixmap(16, 16)))  # type: ignore
         self.cached_ui_text = ""
         self.cached_widget: QWidget | None = None
 
-    def open_in_dock(self):
+    def build_display(self) -> QWidget:
         fname = find_file(
             self._filename,
             raise_if_not_found=True,
@@ -202,7 +237,10 @@ class LucidDockButton(QPushButton):
             self.cached_widget = display
         else:
             display = self.cached_widget
+        return display
 
+    def open_in_dock(self):
+        display = self.build_display()
         LucidDock.add_to_dock_user_choice(title=display.windowTitle(), widget=display)
 
     def readFilename(self) -> str:
@@ -210,6 +248,7 @@ class LucidDockButton(QPushButton):
 
     def setFilename(self, val: str) -> None:
         self._filename = val
+        self.set_default_if_ready()
 
     filename = Property("QString", readFilename, setFilename)
 
@@ -218,5 +257,23 @@ class LucidDockButton(QPushButton):
 
     def setMacro(self, new_macro: str) -> None:
         self._macro = new_macro
+        self.set_default_if_ready()
 
     macros = Property("QString", readMacro, setMacro)
+
+    def readDockDefault(self) -> bool:
+        return self._default
+
+    def setDockDefault(self, is_default: bool):
+        self._default = is_default
+        self.set_default_if_ready()
+
+    default = Property("bool", readDockDefault, setDockDefault)
+
+    def set_default_if_ready(self):
+        print("there")
+        if is_qt_designer() or not all((self._filename, self._macro, self._default)):
+            return
+        print("here")
+        widget = self.build_display()
+        LucidDock.set_default_widget(widget)
